@@ -133,15 +133,23 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Set up QEMU (needed for cross-arch builds)
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push
+      - name: Build and push (multi-arch)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: agents/${{ matrix.agent }}/Dockerfile
           push: true
+          # linux/amd64 for typical cloud K8s (GKE, EKS, most runners);
+          # linux/arm64 for Apple Silicon Macs running Kind locally.
+          # Without this, pulling on the other arch fails with
+          # "no match for platform in manifest".
+          platforms: linux/amd64,linux/arm64
           tags: |
             docker.io/${{ steps.tags.outputs.repo }}:${{ steps.tags.outputs.tag_sha }}
             docker.io/${{ steps.tags.outputs.repo }}:${{ steps.tags.outputs.tag_latest }}
