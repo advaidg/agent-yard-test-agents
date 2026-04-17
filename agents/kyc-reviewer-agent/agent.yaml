@@ -1,0 +1,5 @@
+name: kyc-reviewer-agent
+namespace: acme/compliance
+version: 1.0.0
+description: KYC document review and risk scoring.
+port: 9031

@@ -1,0 +1,5 @@
+name: fraud-detector-agent
+namespace: acme/security
+version: 1.0.0
+description: Flags potentially fraudulent transactions.
+port: 9041

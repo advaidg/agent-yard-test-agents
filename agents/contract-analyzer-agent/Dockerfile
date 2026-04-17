@@ -1,0 +1,11 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY vendor-agentyard-sdk /tmp/sdk/
+RUN pip install --no-cache-dir /tmp/sdk/ anthropic && rm -rf /tmp/sdk/
+
+COPY agents/contract-analyzer-agent/main.py .
+
+ENV YARD_PORT=9030
+CMD ["python", "main.py"]

@@ -1,0 +1,5 @@
+name: email-composer-agent
+namespace: acme/comms
+version: 1.0.0
+description: Drafts professional emails from a brief.
+port: 9033

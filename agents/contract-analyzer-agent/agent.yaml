@@ -1,0 +1,5 @@
+name: contract-analyzer-agent
+namespace: acme/legal
+version: 1.0.0
+description: LLM-powered contract analysis (key terms, risks, obligations).
+port: 9030

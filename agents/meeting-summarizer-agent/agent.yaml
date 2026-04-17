@@ -1,0 +1,5 @@
+name: meeting-summarizer-agent
+namespace: acme/productivity
+version: 1.0.0
+description: Summarizes meeting transcripts into action items.
+port: 9045

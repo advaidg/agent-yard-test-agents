@@ -1,0 +1,5 @@
+name: invoice-processor-agent
+namespace: acme/finance
+version: 1.0.0
+description: Extracts structured data from invoices.
+port: 9040

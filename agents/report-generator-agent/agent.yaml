@@ -1,0 +1,5 @@
+name: report-generator-agent
+namespace: acme/analytics
+version: 1.0.0
+description: Generates structured reports from raw data.
+port: 9035
