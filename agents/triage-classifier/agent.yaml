@@ -1,0 +1,5 @@
+name: triage-classifier
+namespace: acme/support
+version: 1.0.0
+description: Classifies support tickets into triage categories.
+port: 9101

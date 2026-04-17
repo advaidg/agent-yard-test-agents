@@ -1,0 +1,5 @@
+name: triage-sentiment
+namespace: acme/support
+version: 1.0.0
+description: Scores sentiment of support messages.
+port: 9102

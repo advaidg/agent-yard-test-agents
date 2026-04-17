@@ -1,0 +1,5 @@
+name: triage-responder
+namespace: acme/support
+version: 1.0.0
+description: Composes the customer-facing reply.
+port: 9103

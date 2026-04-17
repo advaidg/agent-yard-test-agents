@@ -1,0 +1,191 @@
+name: Build and push agent images
+
+# Builds Docker images for every agent in this repo, pushes them to the
+# configured Docker Hub repo (one repo, many agents, distinguished by
+# tag prefix), and emits a copy-pasteable curl command for announcing
+# each push to an AgentYard instance.
+#
+# Tag scheme per agent: `{dockerhub_repo}:{agent}-{short_sha}` + `:{agent}-latest`
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'agents/**'
+      - 'vendor-agentyard-sdk/**'
+      - '.github/workflows/build-and-push.yml'
+  workflow_dispatch:
+    inputs:
+      agent:
+        description: 'Agent to build ("all" for every agent)'
+        required: true
+        default: 'all'
+      dockerhub_repo:
+        description: 'Target Docker Hub repo (e.g. advaidg/agentyard2)'
+        required: true
+        default: 'advaidg/agentyard2'
+
+env:
+  DEFAULT_DOCKERHUB_REPO: advaidg/agentyard2
+  # When set to a URL, the workflow POSTs to the AgentYard webhook after
+  # pushing each image. When empty (the default — AgentYard is local-only
+  # today), the workflow prints a curl command you can copy-paste.
+  AGENTYARD_WEBHOOK_URL: ${{ vars.AGENTYARD_WEBHOOK_URL }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Detect which agents need to be built. Strategy:
+  #   - workflow_dispatch with agent="all" → build every agent
+  #   - workflow_dispatch with agent="X"   → build just X
+  #   - push that only touches agents/X/   → build just X
+  #   - push that touches vendor-agentyard-sdk/ or the workflow itself
+  #     → rebuild every agent (shared infra changed)
+  # ---------------------------------------------------------------------------
+  detect-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      agents: ${{ steps.pick.outputs.agents }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # need HEAD~1 to diff
+
+      - name: Compute list of agents to build
+        id: pick
+        shell: bash
+        run: |
+          set -e
+          all_agents=$(ls agents 2>/dev/null | sort)
+          if [ -z "$all_agents" ]; then
+            echo "No agents/ subdirectories — nothing to build"
+            echo "agents=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            pick='${{ github.event.inputs.agent }}'
+            if [ "$pick" = "all" ]; then
+              changed="$all_agents"
+            else
+              changed="$pick"
+            fi
+          else
+            changed_files=$(git diff --name-only HEAD~1 HEAD || true)
+            shared_changed=false
+            if echo "$changed_files" | grep -qE '^(vendor-agentyard-sdk/|\.github/)'; then
+              shared_changed=true
+            fi
+            if [ "$shared_changed" = "true" ]; then
+              changed="$all_agents"
+            else
+              changed=$(echo "$changed_files" \
+                | grep -E '^agents/[^/]+/' \
+                | awk -F/ '{print $2}' \
+                | sort -u)
+            fi
+          fi
+
+          if [ -z "$changed" ]; then
+            echo "No matching agent directories changed — skipping build"
+            echo "agents=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          json=$(printf '%s\n' $changed | jq -Rsc 'split("\n") | map(select(length>0))')
+          echo "agents=$json" >> "$GITHUB_OUTPUT"
+          echo "Will build: $changed"
+
+  # ---------------------------------------------------------------------------
+  # Build + push each agent in parallel.
+  # ---------------------------------------------------------------------------
+  build:
+    needs: detect-matrix
+    if: needs.detect-matrix.outputs.agents != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        agent: ${{ fromJson(needs.detect-matrix.outputs.agents) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive tags
+        id: tags
+        shell: bash
+        run: |
+          set -e
+          repo='${{ github.event.inputs.dockerhub_repo || env.DEFAULT_DOCKERHUB_REPO }}'
+          short_sha=$(git rev-parse --short=7 HEAD)
+          echo "repo=$repo"                              >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha"                    >> "$GITHUB_OUTPUT"
+          echo "tag_sha=${{ matrix.agent }}-$short_sha"  >> "$GITHUB_OUTPUT"
+          echo "tag_latest=${{ matrix.agent }}-latest"   >> "$GITHUB_OUTPUT"
+          if [ -f "agents/${{ matrix.agent }}/agent.yaml" ]; then
+            version=$(awk '/^version:/{print $2}' agents/${{ matrix.agent }}/agent.yaml | tr -d '"')
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0"    >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: agents/${{ matrix.agent }}/Dockerfile
+          push: true
+          tags: |
+            docker.io/${{ steps.tags.outputs.repo }}:${{ steps.tags.outputs.tag_sha }}
+            docker.io/${{ steps.tags.outputs.repo }}:${{ steps.tags.outputs.tag_latest }}
+          cache-from: type=gha,scope=${{ matrix.agent }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.agent }}
+
+      - name: Announce to AgentYard (or print curl for manual replay)
+        shell: bash
+        env:
+          WEBHOOK_URL: ${{ env.AGENTYARD_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.YARD_WEBHOOK_SECRET }}
+        run: |
+          set -e
+          payload=$(jq -n \
+            --arg agent_name "${{ matrix.agent }}" \
+            --arg image      "docker.io/${{ steps.tags.outputs.repo }}" \
+            --arg tag        "${{ steps.tags.outputs.tag_sha }}" \
+            --arg version    "${{ steps.tags.outputs.version }}" \
+            --arg commit_sha "${{ steps.tags.outputs.short_sha }}" \
+            --arg pushed_by  "${{ github.actor }}" \
+            '{agent_name:$agent_name,image:$image,tag:$tag,version:$version,commit_sha:$commit_sha,pushed_by:$pushed_by}')
+
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "::notice title=AgentYard webhook::AGENTYARD_WEBHOOK_URL not configured — run this locally to sync the new image to your AgentYard instance:"
+            echo ""
+            echo "curl -X POST https://<your-agentyard>/api/webhooks/agent-image \\"
+            echo "  -H 'X-AgentYard-Webhook-Secret: <YARD_WEBHOOK_SECRET>' \\"
+            echo "  -H 'Content-Type: application/json' \\"
+            echo "  -d '$payload'"
+            exit 0
+          fi
+
+          if [ -z "$WEBHOOK_SECRET" ]; then
+            echo "::error title=Missing secret::AGENTYARD_WEBHOOK_URL is set but secret YARD_WEBHOOK_SECRET is not. Skipping."
+            exit 0
+          fi
+
+          code=$(curl -sS -o /tmp/webhook.out -w '%{http_code}' \
+            -X POST "$WEBHOOK_URL" \
+            -H "X-AgentYard-Webhook-Secret: $WEBHOOK_SECRET" \
+            -H 'Content-Type: application/json' \
+            -d "$payload")
+          echo "Webhook response (HTTP $code):"
+          cat /tmp/webhook.out
+          if [ "$code" != "200" ]; then
+            echo "::warning title=Webhook failed::AgentYard returned HTTP $code — image is pushed but registry not yet notified."
+          fi
